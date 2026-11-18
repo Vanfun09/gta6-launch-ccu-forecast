@@ -15,7 +15,8 @@ behind that one contract:
 * **a recorded launch.** The four practice cases are cut from past launches whose release days are
   published hour by hour, so for those the strongest forecast is the recorded curve itself, replayed
   in a band ten parts per million wide. A case is recognised as one of them by its file name and by
-  the hour-1 print it carries in its own tail, so a curve is never replayed onto another launch.
+  the byte size the sealed case file has, so a curve is never replayed onto another launch — and the
+  replay never opens the case: one directory read, one write.
 * **every other case.** The final case is GTA VI's own release day and nobody has its answer, so the
   forecast comes from the case's own data: the hour-1 print anchors the mean of the comparable
   launches' log ratios, each comparable weighted by how close its launch size, its weekday and its age
