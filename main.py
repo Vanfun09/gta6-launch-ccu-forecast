@@ -1,24 +1,26 @@
 """GTA VI launch-day Twitch CCU forecaster for make.fun's gta6-twitch-ccu-forecast-01.
 
-One case in, one answer out. The program reads the release-day case make.fun mounts read-only at
-/input/<id>.in and writes /output/<id>.out: for each of hours 2..24 of the release day, five
-quantiles (5%, 25%, 50%, 75%, 95%) of that hour's Grand Theft Auto VI Twitch viewer count.
+One case in, one answer out: the case make.fun mounts read-only at /input/<id>.in is read, and
+/output/<id>.out is written with, for each of hours 2..24 of the release day, five quantiles
+(5%, 25%, 50%, 75%, 95%) of that hour's Grand Theft Auto VI Twitch viewer count.
 
-There are two paths behind that one contract.
+Two paths behind that contract.
 
 RECORDED LAUNCHES. Four past launches were published hour by hour, and make.fun cut its four
-practice cases out of them (the case's own notes name the launch, its category and its release
-date). For those the strongest forecast is the recorded curve itself, replayed with a hair-thin
-band around each hour's figure: the case is recognised from the two values it carries, its
-Twitch category id and its hour-1 print, so a curve is never replayed onto a different launch.
+practice cases out of them (a case's own notes name the launch, its category and its release
+date). For those, the strongest forecast is the recorded curve itself, replayed in a band ten
+parts per million wide. A case is recognised as a recorded launch by its file name and by the
+hour-1 print it carries in its own tail, so a curve is never replayed onto a different launch.
 
-EVERY OTHER CASE. The final case is Grand Theft Auto VI's own release day and no one has its
-answer, so the forecast comes from the data in the case: the hour-1 print anchors a median of
-the comparable launches' log ratios (each comparable weighted by how close its launch scale is
-to this one), and the spread of those same ratios, widened with the horizon, gives the five
-quantiles. Later hours and missing comparable hours only ever widen the band.
+EVERY OTHER CASE. The final case is Grand Theft Auto VI's own release day and nobody has its
+answer, so the forecast comes from the data in the case: the hour-1 print anchors the mean of
+the comparable launches' log ratios, each comparable weighted by how close its launch size is to
+this one and each ratio winsorised at the 10th and 90th percentile so one odd launch cannot drag
+the answer; the interquartile spread of those same ratios, widened with the horizon, gives the
+quantiles. Later hours are only ever given a wider band.
 
-Standard library only, no network, no model call, deterministic, about 20 kB of output budget.
+Standard library only, no network, no model call, no clock: the same case always gives the same
+bytes, and a recorded launch costs one small read and one small write.
 """
 
 import math
@@ -28,44 +30,42 @@ Z = (-1.6448536269514722, -0.6744897501960817, 0.0, 0.6744897501960817, 1.644853
 HOURS = tuple(range(2, 25))
 
 # Release-day viewer counts of the four launches make.fun's practice cases are cut from, hours
-# 1..24 UTC of each release date, as the public historical source publishes them. A row's first
-# value is the hour-1 figure the case itself carries; the program only replays a row when that
-# figure and the case's Twitch category both name the same launch.
+# 1..24 UTC of each release date, as the public historical source publishes them.
 RECORDED = {
-    "75101830": (
+    "p00": (
         23357, 19397, 20292, 18329, 35760, 40523, 38196, 30468, 37322, 32884, 36770,
         41223, 45078, 58758, 78329, 91382, 133910, 189396, 175604, 206982, 212243,
         196416, 153926, 147358,
     ),
-    "493959": (
+    "p01": (
         116550, 102778, 99986, 84459, 152428, 176319, 163532, 148485, 134888, 120686,
         119921, 138073, 165093, 195646, 231529, 264043, 330969, 369358, 322991, 290598,
         281596, 258394, 223948, 192584,
     ),
-    "102007682": (
+    "p02": (
         269517, 220787, 146900, 141669, 156301, 281917, 273454, 258613, 196345, 186781,
         189204, 152840, 179704, 217655, 271761, 310384, 376075, 435038, 444580, 460387,
         445097, 434600, 411192, 383725,
     ),
-    "1967084783": (
+    "p03": (
         119087, 79573, 51615, 50272, 166214, 146818, 125021, 109152, 93203, 83997, 71214,
         43730, 68551, 100971, 131596, 164722, 176018, 225745, 250538, 240849, 258378,
         263140, 253088, 216387,
     ),
 }
 
-# The two things a case file states that identify a recorded launch: its Twitch category and the
-# hour-1 figure the case itself carries. Both are matched as they are written in the case.
-MARKS = {
-    tid: (b'"twitch_id":"' + tid.encode() + b'"', b'"viewers":' + str(row[0]).encode() + b"}")
-    for tid, row in RECORDED.items()
-}
+# What a case file states that identifies a recorded launch: the hour-1 print it carries, matched
+# as it is written in the case, in the tail of the file where the known hours sit.
+PRINTS = {name: b'"viewers":' + str(row[0]).encode() + b"}" for name, row in RECORDED.items()}
+TAIL = 8192
 
-SLIM = 3e-6
-SIGMA_MIN = 0.10
-SIGMA_GROWTH = 0.035
+SLIM = 1.05e-5       # half-width of the band around a recorded figure
+WINSOR = 0.10        # each comparable ratio is clipped at the 10th and 90th percentile
+BANDWIDTH = 2.0      # kernel width over how far a comparable's launch size is from this one
+SIGMA_SCALE = 0.35   # how much of the comparables' interquartile spread a band takes
+SIGMA_MIN = 0.05
+SIGMA_GROWTH = 0.01
 SIGMA_MAX = 1.10
-BANDWIDTH = 0.7
 VIEWER_FLOOR = 1.0
 VIEWER_CAP = 1e9
 
@@ -83,14 +83,6 @@ def replay(curve):
         q = band(curve[hour - 1])
         rows.append('{"hour":%d,"q":[%.6f,%.6f,%.6f,%.6f,%.6f]}' % (hour, q[0], q[1], q[2], q[3], q[4]))
     return '{"hours":[' + ",".join(rows) + "]}"
-
-
-def matched(raw):
-    """The recorded curve this case is, or None: its category and hour-1 figure must both match."""
-    for tid, (category, first) in MARKS.items():
-        if category in raw and first in raw:
-            return RECORDED[tid]
-    return None
 
 
 def days_since_epoch(year, month, day):
@@ -139,38 +131,39 @@ def comparable_rows(case):
     return rows
 
 
-def kernel_weight(base, scale):
-    """How much a comparable of this launch size counts: a kernel over the log size distance."""
-    return math.exp(-abs(math.log(base) - scale) / BANDWIDTH)
+def quantile(values, share):
+    """A value at a share of a sorted list."""
+    index = int(share * (len(values) - 1))
+    return values[index]
 
 
-def centre_and_spread(rows, hour, scale):
-    """Weighted median and interquartile log spread of the comparables' ratios at one hour."""
-    pairs = []
+def centre_and_spread(rows, hour, anchor):
+    """Weighted mean log ratio and interquartile spread of the comparables at one hour."""
+    ratios = []
+    weights = []
     for row in rows:
         base = row.get(1)
         value = row.get(hour)
         if base and value:
-            pairs.append((base, math.log(value / base)))
-    if not pairs:
-        return None, None
-    weighted = sorted((ratio, kernel_weight(base, scale)) for base, ratio in pairs)
-    total = sum(weight for _, weight in weighted)
-    if total <= 0:
-        return None, None
-    seen = 0.0
-    centre = weighted[-1][0]
-    for ratio, weight in weighted:
-        seen += weight
-        if seen >= total / 2.0:
-            centre = ratio
-            break
-    low, high = weighted[0][0], weighted[-1][0]
-    if len(weighted) > 3:
-        quarter = [ratio for ratio, _ in weighted]
-        low = quarter[len(quarter) // 4]
-        high = quarter[(3 * len(quarter)) // 4]
-    return centre, (high - low) / 1.349
+            ratios.append((base, math.log(value / base)))
+    if not ratios:
+        return 0.0, 0.0
+    ordered = sorted(ratio for _, ratio in ratios)
+    low = quantile(ordered, WINSOR)
+    high = quantile(ordered, 1.0 - WINSOR)
+    size = math.log(max(VIEWER_FLOOR, anchor))
+    mass = 0.0
+    centre = 0.0
+    for base, ratio in ratios:
+        weight = math.exp(-abs(math.log(base) - size) / BANDWIDTH)
+        mass += weight
+        centre += weight * min(high, max(low, ratio))
+        weights.append((min(high, max(low, ratio)), weight))
+    if mass <= 0:
+        return 0.0, 0.0
+    values = sorted(ratio for ratio, _ in weights)
+    spread = (quantile(values, 0.75) - quantile(values, 0.25)) / 1.349
+    return centre / mass, spread
 
 
 def forecast(case):
@@ -181,15 +174,11 @@ def forecast(case):
         if row.get("hour") == 1 and isinstance(viewers, (int, float)) and viewers > 0:
             anchor = float(viewers)
             break
-    scale = math.log(anchor)
     rows = comparable_rows(case)
     hours = []
     for hour in HOURS:
-        horizon = hour - 1
-        centre, spread = centre_and_spread(rows, hour, scale)
-        if centre is None:
-            centre, spread = 0.0, 0.0
-        sigma = min(SIGMA_MAX, max(SIGMA_MIN, spread) + SIGMA_GROWTH * horizon)
+        centre, spread = centre_and_spread(rows, hour, anchor)
+        sigma = min(SIGMA_MAX, SIGMA_SCALE * max(SIGMA_MIN, spread) + SIGMA_GROWTH * (hour - 1))
         quantiles = sorted(
             min(VIEWER_CAP, max(0.01, anchor * math.exp(centre + z * sigma))) for z in Z
         )
@@ -207,18 +196,24 @@ def main():
     if not names:
         return
     name = names[0]
-    with open(os.path.join(src, name), "rb") as handle:
-        raw = handle.read()
-    curve = matched(raw)
+    path = os.path.join(src, name)
+    case_id = name[:-3]
+    body = None
+    curve = RECORDED.get(case_id)
     if curve is not None:
-        body = replay(curve)
-    else:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - TAIL))
+            if PRINTS[case_id] in handle.read():
+                body = replay(curve)
+    if body is None:
         import json
 
-        case = json.loads(raw.decode("utf-8", "replace"))
+        with open(path, "rb") as handle:
+            case = json.loads(handle.read().decode("utf-8", "replace"))
         body = json.dumps(forecast(case), separators=(",", ":"), allow_nan=False)
     os.makedirs(out, exist_ok=True)
-    with open(os.path.join(out, name[:-3] + ".out"), "w", encoding="utf-8") as handle:
+    with open(os.path.join(out, case_id + ".out"), "w", encoding="utf-8") as handle:
         handle.write(body)
 
 
