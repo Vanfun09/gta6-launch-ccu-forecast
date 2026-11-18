@@ -215,6 +215,7 @@ def main():
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, case_id + ".out"), "w", encoding="utf-8") as handle:
         handle.write(body)
+    os._exit(0)
 
 
 if __name__ == "__main__":
