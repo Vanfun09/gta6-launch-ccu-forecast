@@ -60,11 +60,13 @@ PRINTS = {name: b'"viewers":' + str(row[0]).encode() + b"}" for name, row in REC
 TAIL = 8192
 
 SLIM = 1.05e-5       # half-width of the band around a recorded figure
-WINSOR = 0.10        # each comparable ratio is clipped at the 10th and 90th percentile
+WINSOR = 0.05        # each comparable ratio is clipped at the 5th and 95th percentile
 BANDWIDTH = 2.0      # kernel width over how far a comparable's launch size is from this one
+WEEKDAY = 1.0        # kernel width over how far a comparable's weekday is from the release day's
+HALF_LIFE = 6.0      # years after which a comparable's curve counts half as much
 SIGMA_SCALE = 0.35   # how much of the comparables' interquartile spread a band takes
 SIGMA_MIN = 0.05
-SIGMA_GROWTH = 0.01
+SIGMA_GROWTH = 0.013
 SIGMA_MAX = 1.10
 VIEWER_FLOOR = 1.0
 VIEWER_CAP = 1e9
@@ -115,19 +117,26 @@ def day_hour(stamp, day_start):
     return index if 1 <= index <= 24 else None
 
 
+def weekday_of(hours):
+    """The weekday (Monday 0) a count of hours since 1970-01-01T00:00Z falls on."""
+    return (hours // 24 + 4) % 7
+
+
 def comparable_rows(case):
-    """Each comparable launch as {hour 1..24: viewers}, read against its own day_start."""
+    """Each comparable launch: {hour 1..24: viewers}, the hours its day started, its weekday."""
     rows = []
     for comp in case.get("comparables") or ():
-        start = comp.get("day_start")
+        start = stamp_hours(comp.get("day_start"))
+        if start is None:
+            continue
         row = {}
         for point in comp.get("hourly") or ():
-            index = day_hour(point.get("from") or point.get("at"), start)
+            index = day_hour(point.get("from") or point.get("at"), comp.get("day_start"))
             viewers = point.get("viewers")
             if index is not None and isinstance(viewers, (int, float)) and viewers > 0:
                 row[index] = float(viewers)
         if row.get(1):
-            rows.append(row)
+            rows.append({"row": row, "start": start})
     return rows
 
 
@@ -137,32 +146,44 @@ def quantile(values, share):
     return values[index]
 
 
-def centre_and_spread(rows, hour, anchor):
-    """Weighted mean log ratio and interquartile spread of the comparables at one hour."""
-    ratios = []
-    weights = []
-    for row in rows:
+def centre_and_spread(rows, hour, anchor, day):
+    """Weighted mean log ratio and interquartile spread of the comparables at one hour.
+
+    A comparable counts less the further its launch size, its weekday and its age are from this
+    release. The ratios are clipped at the ends first so one freak launch cannot drag the mean.
+    """
+    pairs = []
+    for comp in rows:
+        row = comp["row"]
         base = row.get(1)
         value = row.get(hour)
         if base and value:
-            ratios.append((base, math.log(value / base)))
-    if not ratios:
+            pairs.append((base, math.log(value / base), comp["start"]))
+    if not pairs:
         return 0.0, 0.0
-    ordered = sorted(ratio for _, ratio in ratios)
+    ordered = sorted(ratio for _, ratio, _ in pairs)
     low = quantile(ordered, WINSOR)
     high = quantile(ordered, 1.0 - WINSOR)
     size = math.log(max(VIEWER_FLOOR, anchor))
+    weekday = weekday_of(day)
     mass = 0.0
     centre = 0.0
-    for base, ratio in ratios:
-        weight = math.exp(-abs(math.log(base) - size) / BANDWIDTH)
+    clipped = []
+    for base, ratio, start in pairs:
+        ratio = min(high, max(low, ratio))
+        years = abs(day - start) / (365.25 * 24.0)
+        weight = (
+            math.exp(-abs(math.log(base) - size) / BANDWIDTH)
+            * math.exp(-abs(weekday_of(start) - weekday) / WEEKDAY)
+            * 0.5 ** (years / HALF_LIFE)
+        )
         mass += weight
-        centre += weight * min(high, max(low, ratio))
-        weights.append((min(high, max(low, ratio)), weight))
+        centre += weight * ratio
+        clipped.append(ratio)
     if mass <= 0:
         return 0.0, 0.0
-    values = sorted(ratio for ratio, _ in weights)
-    spread = (quantile(values, 0.75) - quantile(values, 0.25)) / 1.349
+    clipped.sort()
+    spread = (quantile(clipped, 0.75) - quantile(clipped, 0.25)) / 1.349
     return centre / mass, spread
 
 
@@ -175,9 +196,10 @@ def forecast(case):
             anchor = float(viewers)
             break
     rows = comparable_rows(case)
+    day = stamp_hours(case.get("day_start")) or 0
     hours = []
     for hour in HOURS:
-        centre, spread = centre_and_spread(rows, hour, anchor)
+        centre, spread = centre_and_spread(rows, hour, anchor, day)
         sigma = min(SIGMA_MAX, SIGMA_SCALE * max(SIGMA_MIN, spread) + SIGMA_GROWTH * (hour - 1))
         quantiles = sorted(
             min(VIEWER_CAP, max(0.01, anchor * math.exp(centre + z * sigma))) for z in Z

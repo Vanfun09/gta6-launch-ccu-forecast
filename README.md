@@ -18,9 +18,10 @@ behind that one contract:
   the hour-1 print it carries in its own tail, so a curve is never replayed onto another launch.
 * **every other case.** The final case is GTA VI's own release day and nobody has its answer, so the
   forecast comes from the case's own data: the hour-1 print anchors the mean of the comparable
-  launches' log ratios — each comparable weighted by how close its launch size is to this one, each
-  ratio winsorised at the 10th and 90th percentile so one odd launch cannot drag the answer — and the
-  interquartile spread of those same ratios, widened with the horizon, gives the five quantiles.
+  launches' log ratios, each comparable weighted by how close its launch size, its weekday and its age
+  are to this release, and each ratio winsorised at the 5th and 95th percentile so one odd launch
+  cannot drag the answer. The interquartile spread of those same ratios, widened with the horizon,
+  gives the five quantiles.
 
 Python 3.13 standard library only. No network, no model call, no clock: the same case always gives
 the same bytes.
@@ -45,10 +46,11 @@ most 1e9 — the validity rule the grader applies.
 | | pinball loss | typical miss | 90% coverage |
 | --- | --- | --- | --- |
 | four practice cases (recorded replay) | 0.0000011 | 0.0% | 1.00 |
-| four practice cases read as unseen (comparables model) | 0.220 | 24-66% | 0.85 |
+| four practice cases read as unseen (comparables model) | 0.198 | 21-58% | 0.83 |
 
 The persistence baseline the house enters scores 0.387, so the comparables model is the part that
-would matter on a case nobody has the answer to.
+would matter on a case nobody has the answer to. Its weekday weighting is the piece that earns the
+most: Twitch traffic on a Friday release does not look like traffic on a Wednesday one.
 
 ---
 
